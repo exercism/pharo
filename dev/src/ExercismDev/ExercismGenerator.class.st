@@ -13,19 +13,19 @@ Class {
 	#name : #ExercismGenerator,
 	#superclass : #Object,
 	#classVars : [
-		'DefaultPath'
+		'LastPath',
+		'UseConfigletGenerate'
 	],
 	#category : #'ExercismDev-Generator'
 }
 
-{ #category : #helper }
-ExercismGenerator class >> defaultPath [
-	^ DefaultPath ifNil: [ self defaultPath: FileLocator home pathString]
-]
+{ #category : #'as yet unclassified' }
+ExercismGenerator class >> defaultGenerationPath [
+	|exercismRepo|
+	exercismRepo := LGitRepository allInstances detect: [ :repo |
+		repo workingDirectory pathSegments last = 'pharo-smalltalk'].
+	^ exercismRepo ifNotNil: [(exercismRepo workingDirectory / 'exercises') pathString ]
 
-{ #category : #helper }
-ExercismGenerator class >> defaultPath: pathString [
-	^ DefaultPath := pathString
 ]
 
 { #category : #generation }
@@ -34,12 +34,30 @@ ExercismGenerator class >> generate [
 	the exercism/pharo project. e.g. self generate"
 
 	<example>
-	| path |
-	path := UIManager default
-		chooseDirectory: 'Select the /exercises location in a fresh Exercism/Pharo git project'
-		path: self defaultPath.
+	| generationPath defaultGenerationPath |
+	defaultGenerationPath := self defaultGenerationPath.
+	generationPath := defaultGenerationPath ifNotNil: [ 
+		(self confirm: 'Generate to default location?' , String cr, defaultGenerationPath)
+			ifTrue:  [ defaultGenerationPath ]
+	].
+	
+	generationPath ifNil: [ generationPath := 
+		UIManager default
+			chooseDirectory: 'Select the "pharo-smalltalk/exercises" folder to generate into'
+			path: self lastPath.
+		].
 		
-	path ifNotNil: [ self new generateTo: (self defaultPath: path) ]
+	generationPath ifNotNil: [ self new generateTo: (self lastPath: generationPath) asFileReference ]
+]
+
+{ #category : #helper }
+ExercismGenerator class >> lastPath [
+	^ LastPath ifNil: [ self defaultPath: FileLocator home pathString]
+]
+
+{ #category : #helper }
+ExercismGenerator class >> lastPath: pathString [
+	^ LastPath := pathString
 ]
 
 { #category : #helper }
@@ -78,6 +96,50 @@ ExercismGenerator >> generateCustomDataFor: anExercismExercise to: destinationDi
 					nextPutAll: value;
 					nextPut: $";
 					lf ]]
+]
+
+{ #category : #'as yet unclassified' }
+ExercismGenerator >> generateDefinitions: definitions to: aFileReference [ 
+	| tonelFileMap |
+	tonelFileMap := ExTonelWriter new mappedSnapshot: (MCSnapshot fromDefinitions: definitions).
+	tonelFileMap
+		keysAndValuesDo: [ :file :stream | 
+			(aFileReference / file) ensureCreateFile
+				writeStreamDo: [ :fileStream | fileStream nextPutAll: stream contents ] ].
+]
+
+{ #category : #helper }
+ExercismGenerator >> generateExercise: exercise to: exerciseRootDirRef [
+	"Generate the Tonel source files for a package. Answer the exercise directory reference"
+
+	| exerciseName exerciseDirRef metaDirRef solutionDirRef exerciseDefs solutionDefs |
+
+	"The following directory structure is expected by Exercism infrastructure. 
+	 Canonical reference is output of their utlitity command `configlet generate` "
+	exerciseName := ExercismExercise exerciseNameFrom: exercise exercisePackage.
+	exerciseDirRef := exerciseRootDirRef / exerciseName.
+	metaDirRef     := exerciseRootDirRef / exerciseName / '.meta'.
+	solutionDirRef := exerciseRootDirRef / exerciseName / '.meta' / 'solution'.		
+			
+	exerciseDirRef ensureCreateDirectory.
+	exerciseDirRef deleteAll.
+	
+	exerciseDefs := exercise definitions select: #isExercise.
+	self generateDefinitions: exerciseDefs to: exerciseDirRef.
+	
+	solutionDefs := exercise definitions select: #isSolution.
+	self generateDefinitions: solutionDefs to: solutionDirRef.
+
+	self generateReadmeFor: exercise to: exerciseDirRef.
+	self generateReadmeHintFor: exercise to: metaDirRef.
+	
+	exercise isCustom ifTrue: [ self generateCustomDataFor: exercise to: metaDirRef ]
+]
+
+{ #category : #helper }
+ExercismGenerator >> generateReadmeFor: exercise to: destinationDirectory [
+	(destinationDirectory / 'README.md') ensureCreateFile
+		writeStreamDo: [ :stream | stream nextPutAll: exercise readme withUnixLineEndings ]
 ]
 
 { #category : #helper }
@@ -138,19 +200,14 @@ ExercismGenerator >> generateSourceFilesFor: packageOrTag to: filePathString [
 ]
 
 { #category : #generation }
-ExercismGenerator >> generateTo: filePathReference [
-	| cmd result basePathReference |
+ExercismGenerator >> generateTo: exerciseRootDirectoryReference [
+	| repoFileReference |
 	
-	ExercismExercise allExercises select: [:ex | ex isActive ] thenDo: [:ex |
-			self generateSourceFilesFor: ex exercisePackage to: filePathReference ].
+	ExercismExercise allExercises 
+		select: [:exercise | exercise isActive ] 
+		thenDo: [:exercise | self generateExercise: exercise to: exerciseRootDirectoryReference ].
 		
-	basePathReference := filePathReference parent.
-	ExercismConfigGenerator generateTo: basePathReference.
-	
-	cmd := 'configlet generate ', (basePathReference pathString surroundedBySingleQuotes).		
-	result := PipeableOSProcess waitForCommand: cmd.
-	
-	result succeeded
-		ifFalse: [ 
-			self error: 'failure running "configlet generate" - ' , result outputAndError printString ]
+	repoFileReference := exerciseRootDirectoryReference parent.
+	ExercismConfigGenerator generateTo: repoFileReference.
+
 ]
